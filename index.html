@@ -1,0 +1,368 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Study Notes Organizer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+    textarea:focus {
+      outline: none;
+      box-shadow: 0 0 0 2px #60a5fa;
+    }
+    .notes-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+    }
+    .note-done {
+      border-color: #10b981 !important;
+      background-color: rgba(16, 185, 129, 0.1);
+    }
+    .section-nav-item {
+      transition: background-color 0.2s;
+    }
+    .section-nav-item:hover {
+      background-color: rgba(255, 255, 255, 0.1);
+    }
+    .section-nav-item.active {
+      background-color: #3b82f6;
+      color: white;
+    }
+    .timer-display {
+      font-size: 1rem;
+      font-weight: bold;
+      color: white;
+    }
+    .timer-input {
+      width: 40px;
+      text-align: center;
+      background: #1f2937;
+      border: 1px solid #4b5563;
+      color: white;
+      border-radius: 0.375rem;
+      padding: 0.25rem;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen pt-32">
+  <!-- Section Navigation -->
+  <div class="fixed top-0 left-0 right-0 bg-gray-800 shadow-md z-10">
+    <div class="container mx-auto p-4 max-w-7xl">
+      <div class="flex flex-col sm:flex-row justify-between items-center mb-4 gap-4">
+        <h1 class="text-2xl font-bold text-gray-100">Study Notes Organizer</h1>
+        <div class="flex items-center gap-4">
+          <!-- Section Input -->
+          <div class="flex gap-2">
+            <input id="sectionInput" type="text" 
+                   placeholder="New section" 
+                   class="p-2 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500">
+            <button onclick="addSection()" 
+                    class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition">
+              Add Section
+            </button>
+          </div>
+          <!-- Timer -->
+          <div class="flex items-center gap-2">
+            <span class="timer-display" id="timerDisplay">00:00</span>
+            <input id="timerMinutes" type="number" min="0" max="59" placeholder="MM" class="timer-input">
+            <button id="startTimer" onclick="startTimer()" 
+                    class="bg-blue-500 text-white px-2 py-1 rounded-lg hover:bg-blue-600 transition text-sm">
+              Start
+            </button>
+            <button id="resetTimer" onclick="resetTimer()" 
+                    class="bg-gray-500 text-white px-2 py-1 rounded-lg hover:bg-gray-400 transition text-sm">
+              Reset
+            </button>
+          </div>
+        </div>
+      </div>
+      <div id="sectionNav" class="flex overflow-x-auto gap-2 pb-2"></div>
+    </div>
+  </div>
+
+  <!-- Notes Container -->
+  <div class="container mx-auto p-6 max-w-7xl">
+    <div id="notesContainer" class="mt-8"></div>
+  </div>
+
+  <script>
+    let sections = JSON.parse(localStorage.getItem('studySections')) || [];
+    let expandedSectionId = null;
+
+    // Timer variables
+    let timerInterval = null;
+    let totalSeconds = 0;
+    let isRunning = false;
+
+    // Audio for peep sound
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    function playPeepSound() {
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+      gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.2);
+    }
+
+    function updateTimerDisplay() {
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      document.getElementById('timerDisplay').textContent = 
+        `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function startTimer() {
+      if (isRunning) {
+        clearInterval(timerInterval);
+        isRunning = false;
+        document.getElementById('startTimer').textContent = 'Start';
+        return;
+      }
+      const minutes = parseInt(document.getElementById('timerMinutes').value) || 0;
+      totalSeconds = minutes * 60;
+      if (totalSeconds <= 0) {
+        alert('Please set a valid time.');
+        return;
+      }
+      isRunning = true;
+      document.getElementById('startTimer').textContent = 'Pause';
+      timerInterval = setInterval(() => {
+        if (totalSeconds <= 0) {
+          clearInterval(timerInterval);
+          isRunning = false;
+          document.getElementById('startTimer').textContent = 'Start';
+          playPeepSound();
+          return;
+        }
+        totalSeconds--;
+        updateTimerDisplay();
+      }, 1000);
+      updateTimerDisplay();
+    }
+
+    function resetTimer() {
+      clearInterval(timerInterval);
+      isRunning = false;
+      totalSeconds = 0;
+      document.getElementById('startTimer').textContent = 'Start';
+      updateTimerDisplay();
+      document.getElementById('timerMinutes').value = '';
+    }
+
+    document.addEventListener('DOMContentLoaded', renderSections);
+
+    document.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const activeSection = document.querySelector('.section-nav-item.active');
+      if (!activeSection) {
+        alert('Please select a section first by clicking on it.');
+        return;
+      }
+      const sectionId = activeSection.dataset.sectionId;
+      const items = e.clipboardData.items;
+      for (let item of items) {
+        if (item.type.indexOf('image') !== -1) {
+          const blob = item.getAsFile();
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            addNote(sectionId, '', event.target.result);
+            renderSections();
+          };
+          reader.readAsDataURL(blob);
+        } else if (item.type === 'text/plain') {
+          item.getAsString((text) => {
+            addNote(sectionId, text);
+            renderSections();
+          });
+        }
+      }
+    });
+
+    function addSection() {
+      const sectionName = document.getElementById('sectionInput').value.trim();
+      if (!sectionName) {
+        alert('Please enter a section name.');
+        return;
+      }
+      if (sections.some(s => s.name.toLowerCase() === sectionName.toLowerCase())) {
+        alert('A section with this name already exists. Please use a different name.');
+        return;
+      }
+      const sectionId = Date.now().toString();
+      sections.push({ id: sectionId, name: sectionName, notes: [] });
+      document.getElementById('sectionInput').value = '';
+      expandedSectionId = sectionId;
+      saveSections();
+      renderSections();
+    }
+
+    function addNote(sectionId, text = '', image = '') {
+      const section = sections.find(s => s.id === sectionId);
+      if (section) {
+        section.notes.push({ id: Date.now().toString(), text, image, done: false });
+        saveSections();
+        renderSections();
+        const input = document.getElementById(`noteInput-${sectionId}`);
+        if (input) input.value = '';
+      }
+    }
+
+    function deleteSection(sectionId) {
+      sections = sections.filter(s => s.id !== sectionId);
+      if (expandedSectionId === sectionId) expandedSectionId = null;
+      saveSections();
+      renderSections();
+    }
+
+    function deleteNote(sectionId, noteId) {
+      const section = sections.find(s => s.id === sectionId);
+      if (section) {
+        section.notes = section.notes.filter(n => n.id !== noteId);
+        saveSections();
+        renderSections();
+      }
+    }
+
+    function toggleDone(sectionId, noteId) {
+      const section = sections.find(s => s.id === sectionId);
+      if (section) {
+        const note = section.notes.find(n => n.id === noteId);
+        if (note) {
+          note.done = !note.done;
+          saveSections();
+          renderSections();
+        }
+      }
+    }
+
+    function saveSections() {
+      localStorage.setItem('studySections', JSON.stringify(sections));
+    }
+
+    function toggleSection(sectionId) {
+      expandedSectionId = sectionId;
+      document.querySelectorAll('.section-nav-item').forEach(s => s.classList.remove('active'));
+      document.querySelector(`[data-section-id="${sectionId}"]`).classList.add('active');
+      renderSections();
+    }
+
+    function renderSections() {
+      const navContainer = document.getElementById('sectionNav');
+      navContainer.innerHTML = '';
+      sections.forEach(section => {
+        const navItem = document.createElement('button');
+        navItem.className = `section-nav-item px-4 py-2 rounded-lg text-gray-100 ${section.id === expandedSectionId ? 'active' : ''}`;
+        navItem.dataset.sectionId = section.id;
+        navItem.textContent = section.name;
+        navItem.onclick = () => toggleSection(section.id);
+        navContainer.appendChild(navItem);
+      });
+
+      const notesContainer = document.getElementById('notesContainer');
+      notesContainer.innerHTML = '';
+      if (expandedSectionId) {
+        const section = sections.find(s => s.id === expandedSectionId);
+        if (section) {
+          notesContainer.innerHTML = `
+            <div class="flex flex-col sm:flex-row gap-4 mb-4">
+              <textarea class="flex-grow p-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-blue-500" 
+                        placeholder="Type your note or paste text/screenshot..." 
+                        id="noteInput-${section.id}"></textarea>
+              <button onclick="addNote('${section.id}', document.getElementById('noteInput-${section.id}').value)" 
+                      class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition">
+                Add Note
+              </button>
+            </div>
+            <div class="notes-container">
+              ${section.notes.map(note => `
+                <div class="border border-gray-700 p-4 rounded-lg bg-gray-700 ${note.done ? 'note-done' : ''} relative">
+                  <div class="flex justify-end gap-2 mb-2">
+                    <button onclick="deleteNote('${section.id}', '${note.id}')" 
+                            class="text-gray-100 text-sm border border-gray-500 rounded px-2 py-1 hover:bg-gray-400 transition">
+                      Delete
+                    </button>
+                    <button onclick="toggleDone('${section.id}', '${note.id}')" 
+                            class="text-gray-100 text-sm border border-gray-500 rounded px-2 py-1 hover:bg-gray-400 transition">
+                      ${note.done ? 'Undone' : 'Done'}
+                    </button>
+                  </div>
+                  ${note.image ? `<img src="${note.image}" class="max-w-full h-auto mb-3 rounded" alt="Screenshot">` : ''}
+                  <textarea class="w-full p-2 bg-gray-600 border border-gray-500 rounded-lg text-gray-100 resize-y" 
+                            placeholder="Edit your note..." 
+                            onblur="updateNoteText('${section.id}', '${note.id}', this.value)"
+                            >${note.text}</textarea>
+                </div>
+              `).join('')}
+            </div>
+            <div class="mt-6 text-right">
+              <button onclick="deleteSection('${section.id}')" 
+                      class="text-gray-100 text-sm border border-gray-500 rounded px-4 py-2 hover:bg-gray-400 transition">
+                Delete Section
+              </button>
+            </div>
+          `;
+        }
+      }
+    }
+
+    function updateNoteText(sectionId, noteId, text) {
+      const section = sections.find(s => s.id === sectionId);
+      if (section) {
+        const note = section.notes.find(n => n.id === noteId);
+        if (note) {
+          note.text = text;
+          saveSections();
+        }
+      }
+    }
+  </script>
+</body>
+</html>
